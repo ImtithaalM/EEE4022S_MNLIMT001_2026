@@ -38,5 +38,5 @@ Run once per test folder, after step 1.
 ## Setup
 Set `root` at the top of each script (two lines, comment out the one you are not using). All plate folders and `stats\` sit under it.
 
-## Not part of the main pipeline
-Older or optional scripts, not needed to assess a new plate: `batch_compare_bands_*`, `background_check`, `thermal_anomaly_map`, `compute_indicators`, `uniformity_index`, and the photo-validation scripts (`tune_rust`, `refine_rust`, `rust_colour_rel`, `validate_with_photo`).
+## Additional scripts not part of main pipeline
+Optional scripts, not needed to assess a new plate: `batch_compare_bands_*`, `background_check`, `thermal_anomaly_map`, `compute_indicators`, `uniformity_index`, and the photo-validation scripts (`tune_rust`, `refine_rust`, `rust_colour_rel`, `validate_with_photo`).
