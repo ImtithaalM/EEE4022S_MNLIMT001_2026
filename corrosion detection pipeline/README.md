@@ -1,6 +1,8 @@
 # Passive thermography corrosion assessment (MATLAB)
 
-Corrosion detection on steel plates from thermal IR frames (EEE4022S, UCT). A test plate is compared against a bare-steel reference plate, band by band, using the spread (std) of the plate temperature.
+Passive thermography for detecting and sizing corrosion on steel plates, as a basis for wind turbine tower inspection. No heat source is used: the plate is imaged with a thermal IR camera as it heats and cools naturally, and corroded areas show up as uneven temperature across the surface.
+
+A test plate is compared against a bare-steel reference plate at the same plate temperature (2 degC bands), using the spread (std) of the plate temperature. The result is a verdict (bare-like, uniform or patchy), an estimate of the affected area, and a class for each band.
 
 ## Pipeline order
 
@@ -38,5 +40,5 @@ Run once per test folder, after step 1.
 ## Setup
 Set `root` at the top of each script (two lines, comment out the one you are not using). All plate folders and `stats\` sit under it.
 
-## Additional scripts not part of main pipeline
-Optional scripts, not needed to assess a new plate: `batch_compare_bands_*`, `background_check`, `thermal_anomaly_map`, `compute_indicators`, `uniformity_index`, and the photo-validation scripts (`tune_rust`, `refine_rust`, `rust_colour_rel`, `validate_with_photo`).
+## Additional scripts 
+Olptional scripts, not needed to assess a new plate: `batch_compare_bands_*`, `background_check`, `thermal_anomaly_map`, `compute_indicators`, `uniformity_index`, and the photo-validation scripts (`tune_rust`, `refine_rust`, `rust_colour_rel`, `validate_with_photo`).
