@@ -1,10 +1,10 @@
-# Passive thermography corrosion assessment (MATLAB)
+# Passive Thermography : Corrosion assessment 
 
 Passive thermography for detecting and sizing corrosion on steel plates, as a basis for wind turbine tower inspection. No heat source is used: the plate is imaged with a thermal IR camera as it heats and cools naturally, and corroded areas show up as uneven temperature across the surface.
 
 A test plate is compared against a bare-steel reference plate at the same plate temperature (2 degC bands), using the spread (std) of the plate temperature. The result is a verdict (bare-like, uniform or patchy), an estimate of the affected area, and a class for each band.
 
-## Pipeline order
+## Pipeline 1 order
 
 ```
 IRSoft export  ->  check_roi_fit  ->  corrosion_assess
