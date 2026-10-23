@@ -1,45 +1,71 @@
-% VALIDATE_WITH_PHOTO  Checks whether the thermal anomalies from thermal_anomaly_map sit on corrosion visible in the plate photo (light, FULL, HALF).
-% Registers each photo to the thermal ROI with 4 corner clicks (saved per plate), finds rust colour, then scores every frame per band group (rust lift, Spearman rho, precision / recall / Dice of the largest hot region).
-% Run thermal_anomaly_map first; photos go in DIGITAL. Output: figures and photo_validation_results<tag>.csv in results_photo_check\
+% VALIDATE_WITH_PHOTO  Validation test: do the thermal anomalies sit on corrosion that is VISIBLE in the plate photo?
+%
+% Plates: light (localised patch), FULL (uniform corrosion) and HALF (partly corroded plate).  The photo is only the answer key.
+% thermal_anomaly_map already decides what is anomalous; here that map is laid over the photo and checked:
+%   1) Registration: 4 clicks on the photo (the plate corners, in the orientation of the THERMAL image) line the
+%      photo up with the thermal ROI exactly (the plate outline and ROI insets from extract_plate_roi are used,
+%      so no tape or extra landmarks are needed). Clicks are saved per plate and reused.
+%   2) Rust-coloured photo pixels are found. If stats\rust_protos_<plate>.mat exists (from tune_rust) your tuned
+%      nearest-example classifier is used (rust_colour_rel); otherwise a simple Lab colour rule (brown/orange =
+%      positive a* and b*), which works for vivid rust such as the light plate.  STRICT and LOOSE levels as before.
+%   3) Over every frame of the plate in anomaly_masks%maskTag%.mat:
+%        - pixel scores: mean local rust density at hot / cold / anomalous / non-anomalous pixels, LIFT (> 1 = the
+%          anomalies sit on more rust than the plate average) and Spearman rho (rust density vs thermal residual);
+%        - overlap of the LARGEST joined hot region (the localised-corrosion indicator) with rust:
+%          precision = share of that region lying on rust, recall = share of rust area covered, Dice.
+%      A tolerance (tolPx) widens the rust area a little so a few pixels of registration error do not count against it.
+%   Three rust levels: STRICT (clear rust), LOOSE (also duller rust), FAINT (lighter corrosion around a main patch).
+%   Expect: LIGHT -> large hot region on the rust patch (high precision / recall / lift).  FULL -> almost no
+%   anomalies (uniform), so overlap is not defined; the check there is photo rust % vs thermal (rho, rust density).
+%
+% BAND GROUPS (22-24, 24-26, 28-32, 38-42 and 48-52): the photo and the 4 corner clicks are per PLATE, so each plate is registered once and then
+% scored separately for every band group found in the masks (one results row and one figure per plate and group).
+% The 48-52 group is the POOLED band made by thermal_anomaly_map (48-50 and 50-52 merged, HALF 1573 excluded there).
+% 22-24 and 24-26 are the two room-temperature groups of thermal_anomaly_map. FULL has no frames in 22-24, light only 2, and HALF only 2 in 24-26,
+% so those rows rest on very few frames. The corner clicks are always taken on the 28-32 reference frame when it exists (saved clicks are reused).
+% Run thermal_anomaly_map first (saves stats\anomaly_masks_withTape.mat). Needs the Image Processing Toolbox.
+% Put 10mm_light.jpg, 10mm_full.jpg and 10mm_half.jpg (HALF) in the photo folder (DIGITAL).
+% HALF: first run asks for 4 corner clicks (saved to photo_registration_points_HALF.mat). Run thermal_anomaly_map with HALF first.
+% Output: figures and a results table (one row per plate and band group) in results_photo_check\
 
 % ---- settings ----
 %root = 'C:\Users\Imtithaal Manuel\OneDrive - University of Cape Town\4th year\sem 2\EEE4022S\matlab pipeline';
-root        = 'C:\Users\imtit\OneDrive - University of Cape Town\4th year\sem 2\EEE4022S\matlab pipeline';
+root        = 'C:\Users\imtit\OneDrive - University of Cape Town\4th year\sem 2\EEE4022S\FINAL PIPELINES\corr pp';
 statsFolder = fullfile(root, 'stats');
 outFolder   = fullfile(root, 'results_photo_check');
 if ~isfolder(outFolder), mkdir(outFolder); end
 photoDir    = fullfile(root, 'DIGITAL');
-% refFrame = reference frame per band group (order of groupTags; 0 = no frames); bias = [strict loose] for the tuned classifier;
-% method = rust rule without a tuned classifier ('lab' or 'dark'); map = 'local' (hot + cold) or 'ref' (steel-referenced hot area);
-% warpBlur / warpThr = blur and threshold applied to the rust maps when warping (lower keeps finer rust)
 plates = struct('name',     {'light',           'FULL',           'HALF'}, ...
-                'photo',    {'10mm_light.jpg',  '10mm_full.jpg',  '10mm_half.jpg'}, ...
-                'refFrame', {{1898 1883 1853 1810 1786}, {0 1770 1756 1749 1737}, {1719 1715 1680 1620 1580}}, ...
-                'bias',     {[0 -1],            [-2 -4],          [0 -1]}, ...
+                'photo',    {'10mm_light.jpg',  '10mm.png',  '10mm_half.jpg'}, ...
+                'refFrame', {{1898 1883 1853 1810 1786}, {0 1770 1756 1749 1737}, {1719 1715 1676 1620 1580}}, ...   % reference frame per band group (order of groupTags; 0 = plate has no frames in that group)
+                'bias',     {[0 -1],            [-2 -4],          [0 -1]}, ...     % [strict loose] bias for the tuned classifier (higher = stricter)
                 'method',   {'lab',             'lab',            'dark'}, ...
-                'map',      {'local',           'local',          'ref'}, ...
-                'warpBlur', {1.5,               1.5,              0.6}, ...
-                'warpThr',  {0.5,               0.5,              0.3});
-darkThr     = [-6 0 4];        % 'dark' rule: Otsu lightness threshold + these (strict / loose / faint)
-darkA       = [2 1 0];         % 'dark' rule: minimum a* (strict / loose / faint)
-labThr      = [8 12 6 9 3 6];  % 'lab' rule: a*, b* thresholds (strict, loose, faint)
+                'map',      {'local',           'local',          'ref'}, ...      % thermal map used: 'local' = local-residual anomalies (hot + cold), 'ref' = steel-referenced hot area (for a plate with a large corroded share)
+                'warpBlur', {1.5,               1.5,              0.6}, ...        % blur (photo px) applied to the rust maps before warping; smaller keeps finer rust
+                'warpThr',  {0.5,               0.5,              0.3});           % a warped pixel counts as rust above this (lower keeps finer rust)        % rust rule when there is no tuned classifier: 'lab' = a*/b* colour, 'dark' = darker than the plate's bare steel
+darkThr     = [-6 0 4];        % 'dark' rule: strict / loose / faint = Otsu lightness threshold + these (L units); rust must also have a* above [2 1 0]
+darkA       = [2 1 0];
+labThr      = [8 12 6 9 3 6];  % Lab fallback: strict a*, b*, loose a*, b*, FAINT a*, b* (rust = a* and b* above these)
 maskTag     = '_withTape';     % which anomaly_masks file
-groupTags   = {'22-24', '24-26', '28-32', '38-42', '48-52'};   % band groups, in the order of the refFrame lists
-regGroup    = '28-32';         % group whose reference frame is shown for the corner clicks
-photoMaxSide = 1000;           % photo long side (px)
-densSigma   = 8;               % rust density smoothing (ROI px)
-tolPx       = 6;               % binary overlap tolerance (ROI px)
-closeRad    = 4;  bigMin = 500;   % joining rule for the largest region (as thermal_anomaly_map)
-redoPoints  = false;           % true = click the photo corners again
-nLarge      = 5;               % frames used for the large-scale check
-sigmaLarge  = 20;              % px: smoothing scale of the large-scale check
-% plate outline (must match extract_plate_roi)
+groupTags   = {'22-24', '24-26', '28-32', '38-42', '48-52'};   % band groups, in the order of the refFrame lists above
+useGroups   = groupTags;        % validate ALL band groups (one figure + one results row per plate and band group); e.g. {'38-42'} for one band only
+regGroup    = '38-42';         % band group whose reference frame is shown for the corner clicks (must be in useGroups)
+photoMaxSide = 1000;           % photo is shrunk to this on its long side for the colour work
+densSigma   = 8;               % rust becomes a local density (Gaussian, ROI pixels) so registration error is forgiven
+tolPx       = 6;               % binary overlap tolerance (ROI pixels)
+closeRad    = 4;  bigMin = 500;   % same joining rule as thermal_anomaly_map (largest region)
+redoPoints  = false;           % true = click the photo corners again (set back to false after you have clicked)
+nLarge      = 5;               % frames used for the large-scale check (raw temperature vs rust, needs the xlsx re-read)
+sigmaLarge  = 20;              % px: smoothing scale of that check
+% plate outline used by extract_plate_roi (MUST match its OUT_* values)
 OUT_TOP = 59;  OUT_BOTTOM = 434;  OUT_LEFT = 56;  OUT_RIGHT = 579;
 
-%1.Thermal anomaly data
+% ---- thermal anomaly data ----
 A = load(fullfile(statsFolder, ['anomaly_masks' maskTag '.mat']));
 jobs = A.jobs;
-if size(jobs, 2) < 5, jobs(:,5) = {'28-32'}; end
+if size(jobs, 2) < 5, jobs(:,5) = {'28-32'}; end      % masks saved before the band groups existed
+% The saved masks hold the frame folders of the computer they were made on (thermal_anomaly_map). Rebuild them from 'root'
+% so this script runs on any computer.
 for j = 1:size(jobs, 1)
     nm = jobs{j,1};  if strcmp(nm, 'bare (control)'), nm = 'bare'; end
     jobs{j,2} = fullfile(root, nm);
@@ -50,9 +76,9 @@ for pi_ = 1:numel(plates)
     pl = plates(pi_);
     jP = find(strcmp(jobs(:,1), pl.name));
     if isempty(jP), warning('No %s frames in anomaly_masks%s.mat - skipped.', pl.name, maskTag); continue; end
-    gAvail = groupTags(ismember(groupTags, jobs(jP,5)));
+    gAvail = groupTags(ismember(groupTags, jobs(jP,5)) & ismember(groupTags, useGroups));          % band groups that have frames of this plate
     gReg = regGroup;  if ~ismember(gReg, gAvail), gReg = gAvail{1}; end
-    jG1  = jP(strcmp(jobs(jP,5), gReg));
+    jG1  = jP(strcmp(jobs(jP,5), gReg));                           % registration: reference frame of the registration group (one photo per plate)
     jRef = jG1(find(cell2mat(jobs(jG1,3)) == pl.refFrame{find(strcmp(groupTags, gReg), 1)}, 1));
     if isempty(jRef), jRef = jG1(1); end
     refFrame = jobs{jRef,3};
@@ -64,7 +90,7 @@ for pi_ = 1:numel(plates)
     rows = info.rows;  cols = info.cols;
     if numel(rows) ~= H || numel(cols) ~= W, error('ROI size does not match the saved masks: rerun thermal_anomaly_map.'); end
 
-    %2.Photo and corner clicks
+    % ---- photo and corner clicks ----
     img = imread(fullfile(photoDir, pl.photo));
     ptsFile = fullfile(statsFolder, ['photo_registration_points_' pl.name '.mat']);
     doClick = true;
@@ -72,24 +98,31 @@ for pi_ = 1:numel(plates)
         P = load(ptsFile);
         if isfield(P, 'photoPts') && isequal(size(P.photoPts), [4 2]), photoPts = P.photoPts;  doClick = false; end
     end
-    if doClick
+    if doClick       % no usable saved clicks for this plate (or redoPoints = true)
         labels = {'TOP-LEFT', 'TOP-RIGHT', 'BOTTOM-RIGHT', 'BOTTOM-LEFT'};
         fig = figure('Name', ['Click plate corners: ' pl.name], 'Position', [50 50 1400 800]);
         subplot(1,2,2);  h = imagesc(double(A.resS{jRef}), [-5 5]);  set(h, 'AlphaData', ~isnan(double(A.resS{jRef})));
         set(gca, 'Color', [0.85 0.85 0.85]);  axis image;  title(sprintf('Thermal %s IV\\_%05d: top-left of THIS image is TOP-LEFT', pl.name, refFrame));
-        subplot(1,2,1);  imshow(img);  hold on;
+        axP = subplot(1,2,1);  imshow(img, 'Parent', axP);  hold(axP, 'on');
         photoPts = zeros(4, 2);
         for k = 1:4
-            title(sprintf('Click %d of 4: the plate corner that is %s in the THERMAL image (right)', k, labels{k}));
-            [x, y] = ginput(1);
+            okClick = false;
+            while ~okClick
+                title(axP, sprintf('Click %d of 4 ON THIS PHOTO (left): the plate corner that is %s in the THERMAL image (right)', k, labels{k}));
+                ginput(1);
+                cp = axP.CurrentPoint(1, 1:2);  x = cp(1);  y = cp(2);
+                xl = xlim(axP);  yl = ylim(axP);
+                okClick = x >= xl(1) && x <= xl(2) && y >= yl(1) && y <= yl(2);
+                if ~okClick, title(axP, 'That click was NOT on the photo - click the PHOTO on the left'); pause(1.2); end
+            end
             photoPts(k, :) = [x y];
-            plot(x, y, 'r+', 'MarkerSize', 14, 'LineWidth', 2);  text(x + 10, y, num2str(k), 'Color', 'r', 'FontSize', 14);
+            plot(axP, x, y, 'r+', 'MarkerSize', 14, 'LineWidth', 2);  text(axP, x + 10, y, num2str(k), 'Color', 'r', 'FontSize', 14);
         end
         close(fig);
         save(ptsFile, 'photoPts');
     end
 
-    %3.Rust colour
+    % ---- shrink photo, rust colour ----
     s = photoMaxSide / max(size(img, 1), size(img, 2));
     imgS = imresize(img, s);
     ptsS = photoPts * s;
@@ -114,7 +147,7 @@ for pi_ = 1:numel(plates)
     photoRustLoose  = 100 * nnz(rlS) / nnz(plateS);
     photoRustFaint  = 100 * nnz(rfS) / nnz(plateS);
 
-    %4.Register to the thermal ROI
+    % ---- register to the thermal ROI (outline corners in thermal-frame pixels) ----
     outline = [OUT_LEFT OUT_TOP; OUT_RIGHT OUT_TOP; OUT_RIGHT OUT_BOTTOM; OUT_LEFT OUT_BOTTOM];
     tform  = fitgeotrans(ptsS, outline, 'projective');
     outRef = imref2d([H W], [cols(1)-0.5 cols(end)+0.5], [rows(1)-0.5 rows(end)+0.5]);
@@ -129,25 +162,25 @@ for pi_ = 1:numel(plates)
 
     for gq = 1:numel(gAvail)
         gt = gAvail{gq};  gi = find(strcmp(groupTags, gt), 1);
-        jG = jP(strcmp(jobs(jP,5), gt));
+        jG = jP(strcmp(jobs(jP,5), gt));                          % this plate's frames in this band group
         jRefG = jG(find(cell2mat(jobs(jG,3)) == pl.refFrame{gi}, 1));
         if isempty(jRefG), jRefG = jG(1); end
         refFrameG = jobs{jRefG,3};
-
-        %5.Scores over every frame
+        % ---- scores over every frame of this plate ----
         nF = numel(jG);
         sc  = nan(nF, 3, 7);     % frame x map x [base pHot pCold pAny pNon lift rho]
         ov  = nan(nF, 3, 3);     % frame x rust level x [precision recall dice] of the largest hot region
-        ovA = nan(nF, 1);        % largest hot region, % of the plate
-        thermStat = nan(nF, 3);  % [hot% cold% largest-region%]
-        rhoL = nan(nF, 1);       % large-scale rho: smoothed raw temperature vs smoothed rust density
+        ovA = nan(nF, 1);        % size of the largest hot region, % of the plate
+        thermStat = nan(nF, 3);  % [hot% cold% largest-region%] of the ROI, thermal side of the photo comparison
+        rhoL = nan(nF, 1);       % large-scale Spearman rho: smoothed RAW temperature vs smoothed rust density
         idxLarge = unique(round(linspace(1, nF, min(nLarge, nF))));
         for q = 1:nF
             j = jG(q);
             r = double(A.resS{j});
             valid = ~isnan(r) & photoValid;
+            if nnz(valid) < 50, fprintf('Frame %d skipped: only %d valid px\n', jobs{j,3}, nnz(valid)); continue, end
             if strcmp(pl.map, 'ref')
-                hot = A.hotRefM{j} & valid;  cold = false(size(hot));
+                hot = A.hotRefM{j} & valid;  cold = false(size(hot));      % steel-referenced map: hot area only
             else
                 hot = A.hotM{j} & valid;  cold = A.coldM{j} & valid;
             end
@@ -171,7 +204,7 @@ for pi_ = 1:numel(plates)
                 ovA(q) = 100 * nnz(bigM) / nnz(valid);
                 thermStat(q, 3) = ovA(q);
             end
-            if ismember(q, idxLarge)
+            if ismember(q, idxLarge)      % large-scale check on the raw (not high-passed) temperature
                 [rawROI, ~] = extract_plate_roi(load_thermal_matrix(fullfile(jobs{j,2}, sprintf('IV_%05d.xlsx', jobs{j,3}))), false, '', true);
                 vv = ~isnan(rawROI) & photoValid;
                 tS = nan_smooth(rawROI, vv, sigmaLarge);
@@ -180,15 +213,14 @@ for pi_ = 1:numel(plates)
             end
         end
         M  = squeeze(mean(sc, 1, 'omitnan'));      % 3 x 7
-        Ov = squeeze(mean(ov, 1, 'omitnan'));      % 3 x 3
+        Ov = squeeze(mean(ov, 1, 'omitnan'));      % 3 x 3  (rust level x [precision recall dice])
         nBig = nnz(~isnan(ov(:,1,1)));
         bigPct = mean(ovA, 'omitnan');
-        Th = mean(thermStat, 1, 'omitnan');
+        Th = mean(thermStat, 1, 'omitnan');                 % thermal: hot%, cold%, largest region %
         rhoLarge = mean(rhoL, 'omitnan');
-        rustPct = [100*nnz(rustStrict & photoValid), 100*nnz(rustLoose & photoValid), 100*nnz(rustFaint & photoValid)] / nnz(photoValid);
+        rustPct = [100*nnz(rustStrict & photoValid), 100*nnz(rustLoose & photoValid), 100*nnz(rustFaint & photoValid)] / nnz(photoValid);   % photo rust, % of the ROI
 
-        %6.Results
-        fprintf('\n=== %s, band group %s (%d frames) ===\n', upper(pl.name), gt, nF);
+        fprintf('\n=== %s, band group %s: do the thermal anomalies sit on rust visible in the photo? (%d frames) ===\n', upper(pl.name), gt, nF);
         fprintf('Rust colour method: %s.  Photo rust area: strict %.1f %%, loose %.1f %%, faint %.1f %% of the plate.\n', method, photoRustStrict, photoRustLoose, photoRustFaint);
         fprintf('%-8s %-8s %-12s %-13s %-13s %-13s %-6s %-6s\n', 'Rule', 'Rust %', 'P(rust|hot)', 'P(rust|cold)', 'P(rust|any)', 'P(rust|none)', 'LIFT', 'Rho');
         for m = 1:3
@@ -199,19 +231,21 @@ for pi_ = 1:numel(plates)
             fprintf('Largest hot region (%d of %d frames have one, %.1f %% of the plate) vs each rust level:\n', nBig, nF, bigPct);
             fprintf('  %-8s precision %.2f   recall %.2f   Dice %.2f\n', 'STRICT', Ov(1,1), Ov(1,2), Ov(1,3));
             fprintf('  %-8s <strong>precision %.2f</strong>   recall %.2f   Dice %.2f\n', 'LOOSE', Ov(2,1), Ov(2,2), Ov(2,3));
-            fprintf('  %-8s precision %.2f   recall %.2f   Dice %.2f\n', 'FAINT', Ov(3,1), Ov(3,2), Ov(3,3));
+            fprintf('  %-8s precision %.2f   recall %.2f   Dice %.2f   (faint rust: lighter corrosion around the main patch)\n', 'FAINT', Ov(3,1), Ov(3,2), Ov(3,3));
         else
-            fprintf('No large hot region in any frame: overlap not defined.\n');
+            fprintf('No large hot region in any frame: overlap not defined (uniform plate, as expected for FULL).\n');
         end
         fprintf('\nPHOTO RUST vs THERMAL ANOMALY (%% of the ROI, mean over %d frames):\n', nF);
         fprintf('  Photo rust    strict %5.1f   loose %5.1f   faint %5.1f\n', rustPct(1), rustPct(2), rustPct(3));
         fprintf('  Thermal       hot %5.1f   cold %5.1f   anomalous total %5.1f   largest hot region <strong>%5.1f</strong>\n', Th(1), Th(2), Th(1) + Th(2), Th(3));
         fprintf('  Thermal anomaly / photo rust (faint) = %.2f,  (loose) = %.2f\n', (Th(1) + Th(2)) / max(rustPct(3), eps), (Th(1) + Th(2)) / max(rustPct(2), eps));
         fprintf('  Large-scale check (raw temperature vs rust, %d px smoothing, %d frames): Spearman rho = %.2f\n', sigmaLarge, numel(idxLarge), rhoLarge);
+        fprintf('Densities are mean local rust density (%%) at those pixels. LIFT > 1 = anomalies sit on more rust than average.\n');
+        fprintf('Rho = Spearman correlation of rust density with the thermal residual (+ = rusty areas are warmer).\n');
         summ(end+1, :) = {pl.name, gt, nF, rustPct(1), rustPct(2), rustPct(3), Th(1), Th(2), Th(3), rhoLarge, 100*M(2,1), 100*M(2,4), M(2,6), M(2,7), nBig, bigPct, ...
             Ov(2,1), Ov(2,2), Ov(2,3), Ov(3,1), Ov(3,2), Ov(3,3)}; %#ok<SAGROW>
 
-        %7.Figure for the reference frame
+        % ---- figure for the reference frame ----
         r = double(A.resS{jRefG});
         valid = ~isnan(r) & photoValid;
         if strcmp(pl.map, 'ref')
@@ -220,28 +254,26 @@ for pi_ = 1:numel(plates)
             hot = A.hotM{jRefG} & valid;  cold = A.coldM{jRefG} & valid;
         end
         bigM = big_regions(hot, closeRad, bigMin);
-        f = figure('Name', ['Validation ' pl.name ' ' gt], 'Position', [40 40 1400 800]);
-        subplot(2,2,1);  imshow(photoW);  title(sprintf('%s photo warped to the thermal ROI', pl.name));
-        subplot(2,2,2);  imshow(labeloverlay(photoW, uint8(rustLoose & photoValid) + uint8(rustFaint & photoValid), 'Colormap', [1 0.7 1; 1 0 1], 'Transparency', 0.45));
-        title(sprintf('Photo rust (%% of ROI): loose %.1f (magenta), faint %.1f (pale)', rustPct(2), rustPct(3)));
-        subplot(2,2,3);  h = imagesc(r, [-5 5]);  set(h, 'AlphaData', ~isnan(r));  set(gca, 'Color', [0.85 0.85 0.85]);  axis image;  colorbar;
-        title(sprintf('Thermal residual, IV\\_%05d: anomalous %.1f %% of ROI, largest region %.1f %%', refFrameG, Th(1) + Th(2), Th(3)));
-        subplot(2,2,4);  imshow(labeloverlay(photoW, rustFaint & photoValid, 'Colormap', [1 0.6 0], 'Transparency', 0.55));  hold on;
-        if any(hot(:)),  visboundaries(hot,  'Color', 'g', 'LineWidth', 0.8); end
-        if any(bigM(:)), visboundaries(bigM, 'Color', 'c', 'LineWidth', 2); end
-        if any(cold(:)), visboundaries(cold, 'Color', 'r', 'LineWidth', 0.8); end
-        title('orange fill = rust colour (faint level), green = hot anomalies, cyan = largest hot region, red = cold');
+        f = figure('Name', ['Validation ' pl.name ' ' gt], 'Position', [40 40 1500 460]);
+        tl = tiledlayout(f, 1, 3, 'TileSpacing', 'compact', 'Padding', 'compact');
+        ax1 = nexttile(tl);  imshow(photoW, 'Parent', ax1);
+        title(ax1, {sprintf('%s: photo', pl.name), 'registered to the ROI'}, 'FontSize', 10);
+        ax2 = nexttile(tl);  imshow(labeloverlay(photoW, uint8(rustLoose & photoValid) + uint8(rustFaint & photoValid), 'Colormap', [1 0.7 1; 1 0 1], 'Transparency', 0.45), 'Parent', ax2);
+        title(ax2, {'Photo rust (% of ROI):', sprintf('loose %.1f (magenta), faint %.1f (pale)', rustPct(2), rustPct(3))}, 'FontSize', 10);
+        ax3 = nexttile(tl);  h = imagesc(ax3, r, [-5 5]);  set(h, 'AlphaData', ~isnan(r));  set(ax3, 'Color', [0.85 0.85 0.85]);  axis(ax3, 'image');
+        cb = colorbar(ax3, 'southoutside');  cb.Label.String = 'residual (\circC)';
+        title(ax3, {sprintf('Thermal residual, IV\\_%05d:', refFrameG), sprintf('anomalous %.1f %% of ROI, largest region %.1f %%', Th(1) + Th(2), Th(3))}, 'FontSize', 10);
         for ax = findall(f, 'Type', 'axes')', try, ax.Toolbar = []; catch, end; end
         stamp = char(datetime('now', 'Format', 'yyyyMMdd_HHmmss'));
         try
-            exportgraphics(f, fullfile(outFolder, ['photo_validation_' pl.name '_' gt maskTag '_' stamp '.png']), 'Resolution', 200);
+            exportgraphics(f, fullfile(outFolder, ['photo_validation_' pl.name '_' gt maskTag '_' stamp '.png']), 'Resolution', 300);
         catch ME
             fprintf('Figure for %s NOT saved (%s).\n', pl.name, ME.message);
         end
     end
 end
 
-%8.Results table
+% ---- results table ----
 if ~isempty(summ)
     T = cell2table(summ, 'VariableNames', {'Plate','Group','Frames','RoiRustStrictPct','RoiRustLoosePct','RoiRustFaintPct','ThermHotPct','ThermColdPct','ThermLargestRegionPct','RhoLargeScale','RustDensityPct','PRustGivenAnomalyPct', ...
         'Lift','Rho','FramesWithBigRegion','BigRegionPctOfPlate','PrecisionLoose','RecallLoose','DiceLoose','PrecisionFaint','RecallFaint','DiceFaint'});
@@ -251,7 +283,7 @@ end
 
 % ---------------------------------------------------------------------
 function [rs, rl, rf] = rust_colour_lab(rgb, useMask, thr)
-% Rust = Lab a* and b* both above the thresholds (strict / loose / faint).
+% Rust = brown / orange: Lab a* and b* both positive and above the thresholds (strict / loose / faint).
 lab = rgb2lab(im2double(rgb));
 Af = imgaussfilt(lab(:,:,2), 1.2);
 Bf = imgaussfilt(lab(:,:,3), 1.2);
@@ -261,23 +293,25 @@ rf = (Af > thr(5)) & (Bf > thr(6)) & useMask;
 end
 
 function [rs, rl, rf] = rust_colour_dark(rgb, useMask, offs, aMin)
-% Rust = darker than the plate's bare steel (Otsu split of L* over the plate) and leaning red (a* > aMin).
-% Loose / faint levels also take pixels clearly darker than the local steel (fine pits, thin streaks).
+% Rust = darker than the plate's bare steel. The lightness threshold is the Otsu split of L* over the plate, so it adapts to the
+% photo. Needed when the rust is dark brown with little colour (a*, b* then look like the steel). Rust must also lean red (a* > aMin).
+% FINE rust (small pits and specks, thin streaks) is added at the loose / faint levels: a pixel clearly darker than the steel
+% around it (local median over about 80 px) counts too, even if it is not below the global threshold.
 lab = rgb2lab(im2double(rgb));
 Lf = imgaussfilt(lab(:,:,1), 0.8);
 Af = imgaussfilt(lab(:,:,2), 0.8);
 t = 100 * graythresh(Lf(useMask) / 100);
 Ls = imresize(Lf, 0.25);
 Lbg = imresize(medfilt2(Ls, [21 21], 'symmetric'), size(Lf), 'bilinear');      % local steel level
-fineL = (Lf < Lbg - 6) & (Af > -1) & (Lf < t + 14);
-fineF = (Lf < Lbg - 4) & (Af > -1) & (Lf < t + 14);
+fineL = (Lf < Lbg - 6) & (Af > -1) & (Lf < t + 14);        % clearly darker than its surroundings (loose)
+fineF = (Lf < Lbg - 4) & (Af > -1) & (Lf < t + 14);        % a little less strict (faint)
 rs = (Lf < t + offs(1)) & (Af > aMin(1)) & useMask;
 rl = (((Lf < t + offs(2)) & (Af > aMin(2))) | fineL) & useMask;
 rf = (((Lf < t + offs(3)) & (Af > aMin(3))) | fineF | ((Lf < t + 10) & (Af > -1))) & useMask;
 end
 
 function bigM = big_regions(mask, rad, minA)
-% Anomalous pixels in joined regions of at least minA pixels (same joining as thermal_anomaly_map).
+% Anomalous pixels belonging to joined regions of at least minA pixels (same joining as thermal_anomaly_map).
 cc = bwconncomp(imclose(mask, strel('disk', rad)));
 a = cellfun(@numel, cc.PixelIdxList);
 bigM = false(size(mask));
@@ -288,7 +322,7 @@ bigM = bigM & mask;
 end
 
 function y = nan_smooth(x, valid, sg)
-% Gaussian smoothing that ignores pixels outside 'valid'.
+% Gaussian smoothing that ignores pixels outside 'valid' (NaN-aware).
 z = x;  z(~valid) = 0;
 w = imgaussfilt(double(valid), sg);
 y = imgaussfilt(z, sg) ./ max(w, eps);
